@@ -16,6 +16,7 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+./result/   
 
 # Go workspace file
 go.work
@@ -23,3 +24,6 @@ go.work.sum
 
 # env file
 .env
+result/Fuwapachi API.postman_test_run.json
+Fuwapachi_API.postman_environment.json
+Fuwapachi_API.postman_collection.json

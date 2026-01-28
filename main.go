@@ -117,6 +117,7 @@ func InitDB(config Config) (*sql.DB, error) {
 // Message struct
 type Message struct {
 	ID        string     `json:"id"`
+	UID       string     `json:"uid,omitempty"`
 	Content   string     `json:"content"`
 	CreatedAt time.Time  `json:"created_at"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
@@ -170,12 +171,12 @@ func CreateMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ID is required for message creation
-	if msg.ID == "" {
-		log.Printf("[POST /messages] ❌ Bad Request: missing or empty id")
+	// Content is required for message creation
+	if msg.Content == "" {
+		log.Printf("[POST /messages] ❌ Bad Request: missing or empty content")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "id is required"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "content is required"})
 		return
 	}
 
@@ -183,28 +184,9 @@ func CreateMessage(w http.ResponseWriter, r *http.Request) {
 	msg.CreatedAt = time.Now()
 	msg.DeletedAt = nil
 
-	// Check if message already exists
-	var exists bool
-	err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?)", msg.ID).Scan(&exists)
-	if err != nil {
-		log.Printf("[POST /messages] ❌ Database error: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Database error"})
-		return
-	}
-
-	if exists {
-		log.Printf("[POST /messages] ❌ Conflict: message with ID=%s already exists", msg.ID)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("message with id %s already exists", msg.ID)})
-		return
-	}
-
-	// Insert message into database
-	_, err = db.Exec("INSERT INTO messages (id, content, created_at, deleted_at) VALUES (?, ?, ?, ?)",
-		msg.ID, msg.Content, msg.CreatedAt, msg.DeletedAt)
+	// Insert message into database with AUTO_INCREMENT id
+	result, err := db.Exec("INSERT INTO messages (content, created_at, deleted_at) VALUES (?, ?, ?)",
+		msg.Content, msg.CreatedAt, msg.DeletedAt)
 	if err != nil {
 		log.Printf("[POST /messages] ❌ Database error: %v", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -212,6 +194,18 @@ func CreateMessage(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create message"})
 		return
 	}
+
+	// Get the auto-generated id
+	lastInsertID, err := result.LastInsertId()
+	if err != nil {
+		log.Printf("[POST /messages] ❌ Database error: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve message id"})
+		return
+	}
+
+	msg.ID = fmt.Sprintf("%d", lastInsertID)
 
 	log.Printf("[POST /messages] ✅ Created message: ID=%s, Content=%q", msg.ID, msg.Content)
 
