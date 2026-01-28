@@ -1,0 +1,18 @@
+{
+    "sqltools.connections": [
+        {
+            "mysqlOptions": {
+                "authProtocol": "default",
+                "enableSsl": "Disabled"
+            },
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "100.94.25.122",
+            "port": 3306,
+            "driver": "MariaDB",
+            "name": "fuwapachi-api",
+            "database": "fuwapachi",
+            "username": "fuwapachi-api"
+        }
+    ]
+}
