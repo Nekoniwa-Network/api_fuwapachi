@@ -69,7 +69,7 @@ CREATE DATABASE IF NOT EXISTS fuwapachi;
 USE fuwapachi;
 
 CREATE TABLE IF NOT EXISTS messages (
-    id VARCHAR(255) PRIMARY KEY,
+  id INT AUTO_INCREMENT PRIMARY KEY,
     content TEXT NOT NULL,
     created_at DATETIME NOT NULL,
     deleted_at DATETIME NULL,
@@ -153,13 +153,13 @@ GET /messages
 ```json
 [
   {
-    "id": "msg_123",
+    "id": "1",
     "content": "Hello, World!",
     "created_at": "2026-01-29T12:00:00Z",
     "deleted_at": null
   },
   {
-    "id": "msg_456",
+    "id": "2",
     "content": "Deleted message",
     "created_at": "2026-01-29T11:00:00Z",
     "deleted_at": "2026-01-29T11:30:00Z"
@@ -186,7 +186,7 @@ Content-Type: application/json
 
 ```json
 {
-  "id": "789",
+  "id": "3",
   "content": "New message",
   "created_at": "2026-01-29T12:30:00Z",
   "deleted_at": null
@@ -237,7 +237,7 @@ ws://localhost:8080/ws
 ```json
 {
   "type": "message_deleted",
-  "id": "msg_789",
+  "id": "3",
   "deleted_at": "2026-01-29T12:45:00Z"
 }
 ```
@@ -274,7 +274,7 @@ ws.onclose = () => {
 
 | カラム名 | 型 | 制約 | 説明 |
 |----------|-----|------|------|
-| `id` | VARCHAR(255) | PRIMARY KEY | メッセージの一意識別子 |
+| `id` | INT | AUTO_INCREMENT, PRIMARY KEY | メッセージの一意識別子 |
 | `content` | TEXT | NOT NULL | メッセージの内容 |
 | `created_at` | DATETIME | NOT NULL | 作成日時 |
 | `deleted_at` | DATETIME | NULL | 削除日時（NULL = 削除されていない） |
@@ -291,7 +291,7 @@ ws.onclose = () => {
 ```bash
 curl -X POST http://localhost:8080/messages \
   -H "Content-Type: application/json" \
-  -d '{"id": "msg_001", "content": "Hello from cURL!"}'
+  -d '{"content": "Hello from cURL!"}'
 ```
 
 #### メッセージの取得
@@ -347,8 +347,7 @@ go test -v
 - ✅ Delete Message - メッセージ削除
 
 **Error Cases（エラーハンドリング）：**
-- ❌ Create Message - Missing ID - ID欠落エラー
-- ❌ Create Message - Duplicate ID - 重複IDエラー
+- ❌ Create Message - Missing Content - content欠落エラー
 - ❌ Create Message - Invalid JSON - 不正なJSON
 - ❌ Delete Message - Not Found - 存在しないメッセージ
 
