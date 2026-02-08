@@ -100,7 +100,7 @@ ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ### 5. サーバーの起動
 
 ```bash
-go run main.go
+go run ./cmd/server/
 ```
 
 サーバーが起動すると、以下のような出力が表示されます：
@@ -148,6 +148,8 @@ http://localhost:8080
 GET /messages
 ```
 
+未削除のメッセージからランダムに最大10件を返します。ソフトデリート済みのメッセージは含まれません。
+
 **レスポンス**
 
 ```json
@@ -155,14 +157,12 @@ GET /messages
   {
     "id": "1",
     "content": "Hello, World!",
-    "created_at": "2026-01-29T12:00:00Z",
-    "deleted_at": null
+    "created_at": "2026-01-29T12:00:00Z"
   },
   {
     "id": "2",
-    "content": "Deleted message",
-    "created_at": "2026-01-29T11:00:00Z",
-    "deleted_at": "2026-01-29T11:30:00Z"
+    "content": "Another message",
+    "created_at": "2026-01-29T11:00:00Z"
   }
 ]
 ```
@@ -311,7 +311,7 @@ curl -X DELETE http://localhost:8080/messages/msg_001
 ### テストの実行
 
 ```bash
-go test -v
+go test -v ./internal/handler/
 ```
 
 ### Postmanでのテスト
@@ -367,7 +367,7 @@ go test -v
 ### ビルド
 
 ```bash
-go build -o fuwapachi-server main.go
+go build -o fuwapachi-server ./cmd/server/
 ```
 
 ### 実行
@@ -380,25 +380,26 @@ go build -o fuwapachi-server main.go
 
 ### コンポーネント構成
 
-```
-┌─────────────┐
-│  クライアント  │
-│  (Browser)   │
-└──────┬──────┘
-       │ HTTP/WebSocket
-       │
-┌──────▼──────────────────┐
-│  Fuwapachi API Server    │
-│  - REST API              │
-│  - WebSocket Handler     │
-│  - CORS Middleware       │
-└──────┬──────────────────┘
-       │ SQL
-       │
-┌──────▼──────┐
-│  MariaDB/   │
-│  MySQL      │
-└─────────────┘
+```│  ┌─────────────┐
+│  │  クライアント  │
+│  │  (Browser)   │
+│  └──────┬──────┘
+│         │ HTTP/WebSocket
+│         │
+│  ┌──────▼────────────────┐
+│  │  Fuwapachi API Server    │
+│  │  cmd/server/main.go      │
+│  │  internal/handler/       │
+│  │  internal/config/        │
+│  │  internal/database/      │
+│  │  internal/model/         │
+│  └──────┬────────────────┘
+│         │ SQL
+│         │
+│  ┌──────▼──────┐
+│  │  MariaDB/   │
+│  │  MySQL      │
+│  └─────────────┘
 ```
 
 ### WebSocketブロードキャストフロー
