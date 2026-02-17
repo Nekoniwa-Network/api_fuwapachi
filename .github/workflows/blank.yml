@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: 
+      - 'main'
+  workflow_dispatch:
+
+env:
+  server_file: main
+  systemd_service: fuwapachi-api
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - name: build
+        run: go build cmd/server/main.go
+      - name: create a package
+        run: tar -zcvf ${{env.server_file}}.tar.gz ${{env.server_file}}
+      - name: Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.FUWAPACHI_CICD_ID }}
+          oauth-secret: ${{ secrets.FUWAPACHI_CICD_SECRET }}
+          tags: tag:ci
+      - name: Copy files via SSH
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          source: "${{env.server_file}}.tar.gz"
+          target: "/home/ubuntu"
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            systemctl --user stop ${{env.systemd_service}}
+            rm -rf ${{env.server_file}}
+            tar -xvf ${{env.server_file}}.tar.gz
+            systemctl --user start ${{env.systemd_service}}
+            rm ${{env.server_file}}.tar.gz
+
