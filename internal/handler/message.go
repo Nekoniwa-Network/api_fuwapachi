@@ -3,10 +3,13 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/mux"
 
@@ -37,6 +40,18 @@ func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "content is required"})
 		return
 	}
+
+	// Validate content length (max 200 characters)
+	if utf8.RuneCountInString(msg.Content) > 200 {
+		log.Printf("[POST /messages] ❌ Bad Request: content too long")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "content must be 200 characters or less"})
+		return
+	}
+
+	// Escape HTML to prevent XSS
+	msg.Content = html.EscapeString(msg.Content)
 
 	// Set server-side controlled fields
 	msg.CreatedAt = time.Now()
@@ -128,11 +143,9 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// deleted_at IS NULL で未削除のみ対象、ORDER BY RAND() でランダム10件
-	rows, err := h.DB.Query(
-		"SELECT id, content, created_at FROM messages WHERE deleted_at IS NULL ORDER BY RAND() LIMIT ?",
-		maxMessagesPerRequest,
-	)
+	// 1. 最大IDを取得
+	var maxID int
+	err := h.DB.QueryRow("SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&maxID)
 	if err != nil {
 		log.Printf("[GET /messages] ❌ Database error: %v", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -140,31 +153,61 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Database error"})
 		return
 	}
-	defer rows.Close()
 
 	var msgList []model.Message
-	for rows.Next() {
-		var msg model.Message
-		if err := rows.Scan(&msg.ID, &msg.Content, &msg.CreatedAt); err != nil {
-			log.Printf("[GET /messages] ❌ Scan error: %v", err)
-			continue
-		}
-		msgList = append(msgList, msg)
-	}
 
-	if err := rows.Err(); err != nil {
-		log.Printf("[GET /messages] ❌ Rows iteration error: %v", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Database error"})
-		return
+	if maxID > 0 {
+		// 2. 1〜maxIDの範囲でランダムなIDを多め（例: 50個）に生成する
+		// 削除済みのギャップを考慮して多めに生成し、LIMIT 10で絞る
+		numToGenerate := 50
+		if maxID < 50 {
+			numToGenerate = maxID
+		}
+		
+		selectedIDs := make(map[int]bool)
+		var args []interface{}
+		inClause := ""
+		
+		for len(selectedIDs) < numToGenerate {
+			randID := rand.Intn(maxID) + 1
+			if !selectedIDs[randID] {
+				selectedIDs[randID] = true
+				if len(args) > 0 {
+					inClause += ", "
+				}
+				inClause += "?"
+				args = append(args, randID)
+			}
+		}
+
+		// 3. ランダム生成したID群から、未削除のものを最大10件取得
+		query := fmt.Sprintf("SELECT id, content, created_at FROM messages WHERE id IN (%s) AND deleted_at IS NULL LIMIT ?", inClause)
+		args = append(args, maxMessagesPerRequest)
+
+		rows, err := h.DB.Query(query, args...)
+		if err != nil {
+			log.Printf("[GET /messages] ❌ Database error: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Database error"})
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var msg model.Message
+			if err := rows.Scan(&msg.ID, &msg.Content, &msg.CreatedAt); err != nil {
+				continue
+			}
+			msgList = append(msgList, msg)
+		}
 	}
 
 	if msgList == nil {
 		msgList = []model.Message{}
 	}
 
-	log.Printf("[GET /messages] ✅ Returned %d messages (random selection)", len(msgList))
+	log.Printf("[GET /messages] ✅ Returned %d messages (random selection via MaxID)", len(msgList))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(msgList)
