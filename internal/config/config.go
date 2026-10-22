@@ -4,8 +4,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
+
+// DefaultWSMaxConnections は WebSocket の同時接続数の上限（既定値）
+const DefaultWSMaxConnections = 1000
 
 // Config holds application configuration
 type Config struct {
@@ -26,6 +30,9 @@ type Config struct {
 	// レート制限で CF-Connecting-IP を信じてよい接続元（cloudflared など）の範囲
 	// 空のときは誰も信頼せず、RemoteAddr のホスト部分を使う
 	TrustedProxies []*net.IPNet
+
+	// WebSocket の同時接続数の上限
+	WSMaxConnections int
 }
 
 // Load loads configuration from environment variables
@@ -79,6 +86,16 @@ func Load() Config {
 		log.Printf("⚠️  TRUSTED_PROXY_CIDRS: ignoring invalid entry %q", v)
 	}
 	cfg.TrustedProxies = trusted
+
+	cfg.WSMaxConnections = DefaultWSMaxConnections
+	if v := strings.TrimSpace(os.Getenv("WS_MAX_CONNECTIONS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			log.Printf("⚠️  WS_MAX_CONNECTIONS: invalid value %q, using default %d", v, DefaultWSMaxConnections)
+		} else {
+			cfg.WSMaxConnections = n
+		}
+	}
 
 	return cfg
 }

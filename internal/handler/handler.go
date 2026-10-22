@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/gorilla/mux"
-	"github.com/gorilla/websocket"
 
 	"fuwapachi/internal/config"
 	"fuwapachi/internal/middleware"
@@ -16,18 +15,27 @@ import (
 type Handler struct {
 	DB        *sql.DB
 	Config    config.Config
-	Clients   map[*websocket.Conn]bool
+	Clients   map[*wsClient]struct{}
 	ClientMu  sync.RWMutex
 	Broadcast chan model.DeleteEventMessage
+
+	ws      wsSettings
+	wsSlots chan struct{} // 同時接続数の上限を数えるセマフォ
 }
 
 // New creates a new Handler with the given dependencies
 func New(db *sql.DB, cfg config.Config) *Handler {
+	maxConns := cfg.WSMaxConnections
+	if maxConns <= 0 {
+		maxConns = config.DefaultWSMaxConnections
+	}
 	return &Handler{
 		DB:        db,
 		Config:    cfg,
-		Clients:   make(map[*websocket.Conn]bool),
+		Clients:   make(map[*wsClient]struct{}),
 		Broadcast: make(chan model.DeleteEventMessage, 100),
+		ws:        defaultWSSettings(),
+		wsSlots:   make(chan struct{}, maxConns),
 	}
 }
 

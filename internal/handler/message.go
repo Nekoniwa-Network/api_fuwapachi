@@ -251,12 +251,17 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[DELETE /messages/%s] ✅ Deleted successfully", id)
 
 	// WebSocket経由で他のクライアントに削除を通知
-	h.Broadcast <- model.DeleteEventMessage{
+	// 配信のチャネルが詰まっていても HTTP の応答は止めない（通知は落とす）
+	select {
+	case h.Broadcast <- model.DeleteEventMessage{
 		Type:      "message_deleted",
 		ID:        id,
 		DeletedAt: now,
+	}:
+		log.Printf("[WebSocket] 📢 Broadcasting delete event for message: %s", id)
+	default:
+		log.Printf("[WebSocket] ⚠️  Broadcast queue full, dropping delete event for message: %s", id)
 	}
-	log.Printf("[WebSocket] 📢 Broadcasting delete event for message: %s", id)
 
 	w.WriteHeader(http.StatusNoContent)
 }

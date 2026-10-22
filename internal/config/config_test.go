@@ -48,3 +48,22 @@ func TestLoad_TrustedProxyCIDRs(t *testing.T) {
 		t.Errorf("TrustedProxies = %v, want [100.101.188.8/32]", cfg.TrustedProxies)
 	}
 }
+
+func TestLoad_WSMaxConnections(t *testing.T) {
+	tests := []struct {
+		in   string
+		want int
+	}{
+		{in: "", want: DefaultWSMaxConnections},
+		{in: "50", want: 50},
+		{in: "0", want: DefaultWSMaxConnections},
+		{in: "-1", want: DefaultWSMaxConnections},
+		{in: "abc", want: DefaultWSMaxConnections},
+	}
+	for _, tt := range tests {
+		t.Setenv("WS_MAX_CONNECTIONS", tt.in)
+		if got := Load().WSMaxConnections; got != tt.want {
+			t.Errorf("WS_MAX_CONNECTIONS=%q: got %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}

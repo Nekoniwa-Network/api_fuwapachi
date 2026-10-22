@@ -132,6 +132,7 @@ go run ./cmd/server/
 | `ENV` | 環境 (development/production) | `development` |
 | `ALLOWED_ORIGINS` | CORS許可オリジン（カンマ区切り） | `http://localhost:3000,http://127.0.0.1:3000` |
 | `TRUSTED_PROXY_CIDRS` | レート制限で`CF-Connecting-IP`を信じてよい接続元（cloudflared）の範囲（カンマ区切りのCIDR）。空なら誰も信頼しない | 空 |
+| `WS_MAX_CONNECTIONS` | WebSocketの同時接続数の上限。超えた接続は503で断る | `1000` |
 
 ## API仕様
 
@@ -228,6 +229,10 @@ ws://localhost:8080/ws
 
 - `Origin`ヘッダーが`ALLOWED_ORIGINS`環境変数で指定されたオリジンと一致する必要があります
 - WebSocketプロトコルを使用
+- サーバーはクライアントからのメッセージを使わない（読み捨てる）。4096バイトを超えるメッセージを送ると、1009で接続を閉じる
+- サーバーは54秒ごとにpingを送る。60秒のあいだpongもメッセージも届かない接続は閉じる（ブラウザはpingに自動で応答する）
+- 同時接続数が`WS_MAX_CONNECTIONS`に達しているときは、接続を503で断る
+- 送信が追いつかないクライアント（送信待ちが64件を超えたもの）は切断する
 
 ### イベント
 
