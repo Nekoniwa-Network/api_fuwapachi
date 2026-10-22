@@ -67,3 +67,41 @@ func TestLoad_WSMaxConnections(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAllowedOrigins(t *testing.T) {
+	tests := []struct {
+		name         string
+		in           string
+		wantOrigins  []string
+		wantRejected []string
+	}{
+		{name: "通常", in: "https://a.example,https://b.example", wantOrigins: []string{"https://a.example", "https://b.example"}},
+		{name: "空白と空の要素を捨てる", in: " https://a.example , ,https://b.example,", wantOrigins: []string{"https://a.example", "https://b.example"}},
+		{name: "カンマだけ", in: ",", wantOrigins: []string{}},
+		{name: "* は拒否", in: "*", wantOrigins: []string{}, wantRejected: []string{"*"}},
+		{name: "* を含む要素も拒否", in: "https://a.example,https://*.example", wantOrigins: []string{"https://a.example"}, wantRejected: []string{"https://*.example"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origins, rejected := ParseAllowedOrigins(tt.in)
+			if !reflect.DeepEqual(origins, tt.wantOrigins) {
+				t.Errorf("origins = %q, want %q", origins, tt.wantOrigins)
+			}
+			if !reflect.DeepEqual(rejected, tt.wantRejected) {
+				t.Errorf("rejected = %q, want %q", rejected, tt.wantRejected)
+			}
+		})
+	}
+}
+
+func TestLoad_AllowedOrigins(t *testing.T) {
+	t.Setenv("ALLOWED_ORIGINS", "")
+	if got := Load().AllowedOrigins; !reflect.DeepEqual(got, []string{"http://localhost:3000", "http://127.0.0.1:3000"}) {
+		t.Errorf("default AllowedOrigins = %q", got)
+	}
+
+	t.Setenv("ALLOWED_ORIGINS", "https://a.example,,*")
+	if got := Load().AllowedOrigins; !reflect.DeepEqual(got, []string{"https://a.example"}) {
+		t.Errorf("AllowedOrigins = %q, want [https://a.example]", got)
+	}
+}

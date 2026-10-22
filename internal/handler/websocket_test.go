@@ -279,3 +279,16 @@ func TestDeleteMessage_ReturnsWhenBroadcastQueueFull(t *testing.T) {
 		t.Errorf("unmet expectations: %v", err)
 	}
 }
+
+// ALLOWED_ORIGINS の末尾のカンマで空のオリジンが許可され、Origin の無い接続が通ってしまわないこと
+func TestWebSocket_TrailingCommaDoesNotAllowMissingOrigin(t *testing.T) {
+	origins, _ := config.ParseAllowedOrigins(testOrigin + ",")
+	h := New(nil, config.Config{AllowedOrigins: origins})
+	server := httptest.NewServer(h.SetupRouter())
+	defer server.Close()
+
+	u := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws"
+	if _, _, err := websocket.DefaultDialer.Dial(u, nil); err == nil {
+		t.Error("connection without Origin header should be refused")
+	}
+}

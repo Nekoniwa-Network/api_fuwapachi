@@ -38,14 +38,7 @@ func main() {
 	router := h.SetupRouter()
 
 	// CORS対応
-	c := cors.New(cors.Options{
-		AllowedOrigins:   cfg.AllowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS", "PUT"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
-		ExposedHeaders:   []string{"Content-Length"},
-		MaxAge:           300,
-		AllowCredentials: true,
-	})
+	c := cors.New(server.CORSOptions(cfg.AllowedOrigins))
 
 	httpHandler := c.Handler(router)
 

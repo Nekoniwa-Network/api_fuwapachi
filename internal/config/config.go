@@ -67,19 +67,23 @@ func Load() Config {
 	}
 
 	cfg := Config{
-		DBHost:         dbHost,
-		DBPort:         dbPort,
-		DBUser:         dbUser,
-		DBPassword:     dbPassword,
-		DBName:         dbName,
-		ServerPort:     serverPort,
-		Env:            env,
-		AllowedOrigins: strings.Split(allowedOrigins, ","),
+		DBHost:     dbHost,
+		DBPort:     dbPort,
+		DBUser:     dbUser,
+		DBPassword: dbPassword,
+		DBName:     dbName,
+		ServerPort: serverPort,
+		Env:        env,
 	}
 
-	for i := range cfg.AllowedOrigins {
-		cfg.AllowedOrigins[i] = strings.TrimSpace(cfg.AllowedOrigins[i])
+	origins, rejected := ParseAllowedOrigins(allowedOrigins)
+	for _, v := range rejected {
+		log.Printf("⚠️  ALLOWED_ORIGINS: rejecting wildcard entry %q (list each origin explicitly)", v)
 	}
+	if len(origins) == 0 {
+		log.Printf("⚠️  ALLOWED_ORIGINS has no usable entry: no origin is allowed")
+	}
+	cfg.AllowedOrigins = origins
 
 	trusted, invalid := ParseCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
 	for _, v := range invalid {
@@ -98,6 +102,27 @@ func Load() Config {
 	}
 
 	return cfg
+}
+
+// ParseAllowedOrigins はカンマ区切りのオリジンの並びを解釈する
+//
+// 前後の空白を除き、空の要素は捨てる（空文字のオリジンが許可一覧に入ると、
+// Origin ヘッダーの無い WebSocket 接続が通ってしまう）。
+// "*" を含む要素は全許可やワイルドカードになるため、rejected に入れて捨てる。
+func ParseAllowedOrigins(s string) (origins []string, rejected []string) {
+	origins = []string{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "*") {
+			rejected = append(rejected, part)
+			continue
+		}
+		origins = append(origins, part)
+	}
+	return origins, rejected
 }
 
 // ParseCIDRs はカンマ区切りの CIDR の並びを解釈する
