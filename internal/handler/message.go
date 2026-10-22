@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -15,6 +16,18 @@ import (
 
 	"fuwapachi/internal/model"
 )
+
+// dbWriteTimeout は INSERT と UPDATE にかけてよい時間（テストで短くできるよう変数にする）
+var dbWriteTimeout = 5 * time.Second
+
+// writeContext は状態を変える DB 呼び出し用のコンテキストを返す
+//
+// 要求の取り消しは引き継がず、期限だけを付ける。読み取りと違い、利用者が切断した
+// 時点で打ち切ると、MariaDB では文が確定しているのに 500 を返し、DELETE なら
+// 削除の通知も出ない場面が生じるため。
+func writeContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), dbWriteTimeout)
+}
 
 // CreateMessage handles POST /messages
 func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +71,9 @@ func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	msg.DeletedAt = nil
 
 	// Insert message into database with AUTO_INCREMENT id
-	result, err := h.DB.ExecContext(r.Context(), "INSERT INTO messages (content, created_at, deleted_at) VALUES (?, ?, ?)",
+	writeCtx, cancel := writeContext(r)
+	defer cancel()
+	result, err := h.DB.ExecContext(writeCtx, "INSERT INTO messages (content, created_at, deleted_at) VALUES (?, ?, ?)",
 		msg.Content, msg.CreatedAt, msg.DeletedAt)
 	if err != nil {
 		log.Printf("[POST /messages] ❌ Database error: %v", err)
@@ -239,7 +254,9 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Update deleted_at timestamp
 	now := time.Now()
-	_, err = h.DB.ExecContext(r.Context(), "UPDATE messages SET deleted_at = ? WHERE id = ?", now, id)
+	writeCtx, cancel := writeContext(r)
+	defer cancel()
+	_, err = h.DB.ExecContext(writeCtx, "UPDATE messages SET deleted_at = ? WHERE id = ?", now, id)
 	if err != nil {
 		log.Printf("[DELETE /messages/%s] ❌ Database error: %v", id, err)
 		w.Header().Set("Content-Type", "application/json")
