@@ -58,7 +58,7 @@ func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	msg.DeletedAt = nil
 
 	// Insert message into database with AUTO_INCREMENT id
-	result, err := h.DB.Exec("INSERT INTO messages (content, created_at, deleted_at) VALUES (?, ?, ?)",
+	result, err := h.DB.ExecContext(r.Context(), "INSERT INTO messages (content, created_at, deleted_at) VALUES (?, ?, ?)",
 		msg.Content, msg.CreatedAt, msg.DeletedAt)
 	if err != nil {
 		log.Printf("[POST /messages] ❌ Database error: %v", err)
@@ -145,7 +145,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 
 	// 1. 最大IDを取得
 	var maxID int
-	err := h.DB.QueryRow("SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&maxID)
+	err := h.DB.QueryRowContext(r.Context(), "SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&maxID)
 	if err != nil {
 		log.Printf("[GET /messages] ❌ Database error: %v", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -184,7 +184,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		query := fmt.Sprintf("SELECT id, content, created_at FROM messages WHERE id IN (%s) AND deleted_at IS NULL LIMIT ?", inClause)
 		args = append(args, maxMessagesPerRequest)
 
-		rows, err := h.DB.Query(query, args...)
+		rows, err := h.DB.QueryContext(r.Context(), query, args...)
 		if err != nil {
 			log.Printf("[GET /messages] ❌ Database error: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -220,7 +220,7 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Check if message exists and is not already deleted
 	var exists bool
-	err := h.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND deleted_at IS NULL)", id).Scan(&exists)
+	err := h.DB.QueryRowContext(r.Context(), "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND deleted_at IS NULL)", id).Scan(&exists)
 	if err != nil {
 		log.Printf("[DELETE /messages/%s] ❌ Database error: %v", id, err)
 		w.Header().Set("Content-Type", "application/json")
@@ -239,7 +239,7 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Update deleted_at timestamp
 	now := time.Now()
-	_, err = h.DB.Exec("UPDATE messages SET deleted_at = ? WHERE id = ?", now, id)
+	_, err = h.DB.ExecContext(r.Context(), "UPDATE messages SET deleted_at = ? WHERE id = ?", now, id)
 	if err != nil {
 		log.Printf("[DELETE /messages/%s] ❌ Database error: %v", id, err)
 		w.Header().Set("Content-Type", "application/json")
