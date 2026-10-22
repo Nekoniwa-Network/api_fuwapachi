@@ -1,63 +1,138 @@
 package middleware
 
 import (
+	"container/list"
 	"encoding/json"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
+// DefaultMaxClients は limiter を保持する接続元の上限（既定値）
+const DefaultMaxClients = 10000
+
+// clientIdleTTL を超えて見えなかった接続元の limiter は掃除で捨てる
+const clientIdleTTL = 3 * time.Minute
+
+// cfConnectingIPHeader は Cloudflare が付ける、利用者の IP を示すヘッダー
+const cfConnectingIPHeader = "CF-Connecting-IP"
+
+// RateLimiter は接続元ごとにトークンバケットを持つレート制限
+//
+// 接続元の数が maxClients に達したときは、最も長く見えていない接続元の
+// limiter を捨てて新しい接続元を受け入れる（LRU）。
 type RateLimiter struct {
-	mu      sync.Mutex
-	clients map[string]*client
+	mu             sync.Mutex
+	clients        map[string]*list.Element
+	lru            *list.List // 先頭が最近、末尾が最古
+	maxClients     int
+	trustedProxies []*net.IPNet
+	now            func() time.Time
 }
 
 type client struct {
+	key      string
 	limiter  *rate.Limiter
 	lastSeen time.Time
 }
 
-// NewRateLimiter creates a new RateLimiter
+// NewRateLimiter は信頼するプロキシ無し・既定の上限で RateLimiter を作る
 func NewRateLimiter() *RateLimiter {
-	rl := &RateLimiter{
-		clients: make(map[string]*client),
-	}
+	return NewRateLimiterWithConfig(nil, DefaultMaxClients)
+}
+
+// NewRateLimiterWithConfig は信頼するプロキシの範囲と接続元の上限を指定して RateLimiter を作る
+//
+// trustedProxies に入る接続元から来た要求に限り、CF-Connecting-IP の値を接続元とみなす。
+// maxClients が 0 以下のときは DefaultMaxClients を使う。
+func NewRateLimiterWithConfig(trustedProxies []*net.IPNet, maxClients int) *RateLimiter {
+	rl := newRateLimiter(trustedProxies, maxClients)
 	go rl.cleanup()
 	return rl
+}
+
+func newRateLimiter(trustedProxies []*net.IPNet, maxClients int) *RateLimiter {
+	if maxClients <= 0 {
+		maxClients = DefaultMaxClients
+	}
+	return &RateLimiter{
+		clients:        make(map[string]*list.Element),
+		lru:            list.New(),
+		maxClients:     maxClients,
+		trustedProxies: trustedProxies,
+		now:            time.Now,
+	}
 }
 
 func (rl *RateLimiter) cleanup() {
 	for {
 		time.Sleep(time.Minute)
-		rl.mu.Lock()
-		for ip, client := range rl.clients {
-			// Remove clients unseen for 3 minutes
-			if time.Since(client.lastSeen) > 3*time.Minute {
-				delete(rl.clients, ip)
-			}
-		}
-		rl.mu.Unlock()
+		rl.removeIdle()
 	}
 }
 
-// Limit applies rate limiting based on IP address
+// removeIdle は clientIdleTTL を超えて見えていない接続元を捨てる
+func (rl *RateLimiter) removeIdle() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := rl.now()
+	for e := rl.lru.Back(); e != nil; {
+		c := e.Value.(*client)
+		if now.Sub(c.lastSeen) <= clientIdleTTL {
+			// 末尾から古い順に並んでいるので、ここより前はすべて新しい
+			break
+		}
+		prev := e.Prev()
+		rl.lru.Remove(e)
+		delete(rl.clients, c.key)
+		e = prev
+	}
+}
+
+// Len は保持している接続元の数を返す
+func (rl *RateLimiter) Len() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return len(rl.clients)
+}
+
+// limiterFor は key の limiter を返す。無ければ作り、上限を超える分は最古を捨てる
+func (rl *RateLimiter) limiterFor(key string, r rate.Limit, b int) *rate.Limiter {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := rl.now()
+	if e, ok := rl.clients[key]; ok {
+		c := e.Value.(*client)
+		c.lastSeen = now
+		rl.lru.MoveToFront(e)
+		return c.limiter
+	}
+
+	for len(rl.clients) >= rl.maxClients {
+		oldest := rl.lru.Back()
+		if oldest == nil {
+			break
+		}
+		rl.lru.Remove(oldest)
+		delete(rl.clients, oldest.Value.(*client).key)
+	}
+
+	c := &client{key: key, limiter: rate.NewLimiter(r, b), lastSeen: now}
+	rl.clients[key] = rl.lru.PushFront(c)
+	return c.limiter
+}
+
+// Limit applies rate limiting based on the client IP address
 func (rl *RateLimiter) Limit(r rate.Limit, b int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			ip := req.RemoteAddr
-			// if forwarded := req.Header.Get("X-Forwarded-For"); forwarded != "" {
-			// 	ip = strings.Split(forwarded, ",")[0]
-			// }
-
-			rl.mu.Lock()
-			if _, found := rl.clients[ip]; !found {
-				rl.clients[ip] = &client{limiter: rate.NewLimiter(r, b)}
-			}
-			rl.clients[ip].lastSeen = time.Now()
-			limiter := rl.clients[ip].limiter
-			rl.mu.Unlock()
+			ip := ClientIP(req, rl.trustedProxies)
+			limiter := rl.limiterFor(ip, r, b)
 
 			if !limiter.Allow() {
 				w.Header().Set("Content-Type", "application/json")
@@ -69,4 +144,47 @@ func (rl *RateLimiter) Limit(r rate.Limit, b int) func(http.Handler) http.Handle
 			next.ServeHTTP(w, req)
 		})
 	}
+}
+
+// ClientIP はレート制限の鍵にする接続元の IP を返す
+//
+//   - RemoteAddr からポートを外したホスト部分を使う
+//   - そのホストが trustedProxies に入るときに限り、CF-Connecting-IP の値が
+//     IP として正しければそれを使う
+//   - X-Forwarded-For は偽装できるため使わない
+func ClientIP(req *http.Request, trustedProxies []*net.IPNet) string {
+	host := remoteHost(req.RemoteAddr)
+	remoteIP := net.ParseIP(host)
+	if remoteIP == nil {
+		// RemoteAddr が IP でない（テストなど）ときはそのまま鍵にする
+		return host
+	}
+
+	if containsIP(trustedProxies, remoteIP) {
+		if v := strings.TrimSpace(req.Header.Get(cfConnectingIPHeader)); v != "" {
+			if cfIP := net.ParseIP(v); cfIP != nil {
+				return cfIP.String()
+			}
+		}
+	}
+
+	return remoteIP.String()
+}
+
+// remoteHost は "host:port" からホスト部分を取り出す。ポートが無いときは全体を返す
+func remoteHost(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return strings.Trim(remoteAddr, "[]")
+	}
+	return host
+}
+
+func containsIP(nets []*net.IPNet, ip net.IP) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

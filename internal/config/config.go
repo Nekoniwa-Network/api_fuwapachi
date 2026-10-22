@@ -1,6 +1,8 @@
 package config
 
 import (
+	"log"
+	"net"
 	"os"
 	"strings"
 )
@@ -20,6 +22,10 @@ type Config struct {
 
 	// CORS設定
 	AllowedOrigins []string
+
+	// レート制限で CF-Connecting-IP を信じてよい接続元（cloudflared など）の範囲
+	// 空のときは誰も信頼せず、RemoteAddr のホスト部分を使う
+	TrustedProxies []*net.IPNet
 }
 
 // Load loads configuration from environment variables
@@ -68,5 +74,45 @@ func Load() Config {
 		cfg.AllowedOrigins[i] = strings.TrimSpace(cfg.AllowedOrigins[i])
 	}
 
+	trusted, invalid := ParseCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	for _, v := range invalid {
+		log.Printf("⚠️  TRUSTED_PROXY_CIDRS: ignoring invalid entry %q", v)
+	}
+	cfg.TrustedProxies = trusted
+
 	return cfg
+}
+
+// ParseCIDRs はカンマ区切りの CIDR の並びを解釈する
+//
+// 空の要素は捨てる。"/" の無い IP は 1 台だけの範囲（/32 または /128）として扱う。
+// 解釈できない要素は invalid に入れて返し、範囲には含めない（信頼する範囲を広げない）。
+func ParseCIDRs(s string) (nets []*net.IPNet, invalid []string) {
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !strings.Contains(part, "/") {
+			ip := net.ParseIP(part)
+			if ip == nil {
+				invalid = append(invalid, part)
+				continue
+			}
+			bits := 128
+			if ip.To4() != nil {
+				ip = ip.To4()
+				bits = 32
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			invalid = append(invalid, part)
+			continue
+		}
+		nets = append(nets, n)
+	}
+	return nets, invalid
 }

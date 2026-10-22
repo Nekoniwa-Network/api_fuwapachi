@@ -45,7 +45,7 @@ func (h *Handler) SetupRouter() *mux.Router {
 	deleteRouter := r.Methods("DELETE").Subrouter()
 	deleteRouter.HandleFunc("/messages/{id}", h.DeleteMessage)
 
-	rl := middleware.NewRateLimiter()
+	rl := middleware.NewRateLimiterWithConfig(h.Config.TrustedProxies, middleware.DefaultMaxClients)
 	// limit to 1 request per second with a burst of 5 per IP
 	postRouter.Use(rl.Limit(1, 5))
 	deleteRouter.Use(rl.Limit(1, 5))
