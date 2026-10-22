@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"fuwapachi/internal/middleware"
 	"fuwapachi/internal/model"
 )
 
@@ -41,10 +42,11 @@ func defaultWSSettings() wsSettings {
 
 // wsClient は接続 1 本ぶんの状態
 type wsClient struct {
-	conn *websocket.Conn
-	send chan []byte
-	done chan struct{}
-	once sync.Once
+	conn  *websocket.Conn
+	send  chan []byte
+	done  chan struct{}
+	once  sync.Once
+	ipKey string // 接続元ごとの上限の鍵。空なら数えていない
 }
 
 // createUpgrader creates a WebSocket upgrader with the given allowed origins
@@ -69,12 +71,61 @@ func (h *Handler) ClientCount() int {
 	return len(h.Clients)
 }
 
+// wsIPKey は接続元ごとの上限に使う鍵を返す
+//
+// 信頼するプロキシが未設定のときは空を返し、接続元ごとの上限を使わない。
+// トンネルの裏では RemoteAddr が全員 cloudflared になり、数えると正規の利用者が
+// まとめて締め出されるため（全体の上限だけが効く）。
+func (h *Handler) wsIPKey(r *http.Request) string {
+	if len(h.Config.TrustedProxies) == 0 {
+		return ""
+	}
+	return middleware.ClientIP(r, h.Config.TrustedProxies)
+}
+
+// acquireIPSlot は接続元ごとの枠を 1 つ取る。上限に達していれば false
+func (h *Handler) acquireIPSlot(key string) bool {
+	if key == "" {
+		return true
+	}
+	h.ClientMu.Lock()
+	defer h.ClientMu.Unlock()
+	if h.wsPerIP[key] >= h.wsPerIPMax {
+		return false
+	}
+	h.wsPerIP[key]++
+	return true
+}
+
+// releaseIPSlot は接続元ごとの枠を 1 つ返す
+func (h *Handler) releaseIPSlot(key string) {
+	if key == "" {
+		return
+	}
+	h.ClientMu.Lock()
+	defer h.ClientMu.Unlock()
+	if h.wsPerIP[key] <= 1 {
+		delete(h.wsPerIP, key)
+		return
+	}
+	h.wsPerIP[key]--
+}
+
 // HandleWebSocket handles GET /ws
 func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// 接続元ごとの上限。1 つの接続元が全体の枠を埋めて他の利用者を締め出せないようにする
+	ipKey := h.wsIPKey(r)
+	if !h.acquireIPSlot(ipKey) {
+		log.Printf("[WebSocket] ❌ Per-client connection limit reached (%d) for %s", h.wsPerIPMax, ipKey)
+		http.Error(w, "Too many WebSocket connections from this client", http.StatusTooManyRequests)
+		return
+	}
+
 	// 同時接続数の上限。Upgrade の前に枠を取り、取れなければ 503 を返す
 	select {
 	case h.wsSlots <- struct{}{}:
 	default:
+		h.releaseIPSlot(ipKey)
 		log.Printf("[WebSocket] ❌ Connection limit reached (%d)", cap(h.wsSlots))
 		http.Error(w, "Too many WebSocket connections", http.StatusServiceUnavailable)
 		return
@@ -84,14 +135,16 @@ func (h *Handler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		<-h.wsSlots
+		h.releaseIPSlot(ipKey)
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
 
 	c := &wsClient{
-		conn: conn,
-		send: make(chan []byte, wsSendBuffer),
-		done: make(chan struct{}),
+		conn:  conn,
+		send:  make(chan []byte, wsSendBuffer),
+		done:  make(chan struct{}),
+		ipKey: ipKey,
 	}
 
 	h.ClientMu.Lock()
@@ -117,6 +170,7 @@ func (h *Handler) closeClient(c *wsClient) {
 		h.ClientMu.Unlock()
 
 		<-h.wsSlots
+		h.releaseIPSlot(c.ipKey)
 		log.Printf("[WebSocket] Client disconnected. Total clients: %d", remainingClients)
 	})
 }

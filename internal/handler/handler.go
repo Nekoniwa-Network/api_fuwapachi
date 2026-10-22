@@ -21,6 +21,9 @@ type Handler struct {
 
 	ws      wsSettings
 	wsSlots chan struct{} // 同時接続数の上限を数えるセマフォ
+
+	wsPerIP    map[string]int // 接続元ごとの接続数（ClientMu で守る）
+	wsPerIPMax int
 }
 
 // New creates a new Handler with the given dependencies
@@ -29,13 +32,19 @@ func New(db *sql.DB, cfg config.Config) *Handler {
 	if maxConns <= 0 {
 		maxConns = config.DefaultWSMaxConnections
 	}
+	perIPMax := cfg.WSMaxConnectionsPerIP
+	if perIPMax <= 0 {
+		perIPMax = config.DefaultWSMaxConnectionsPerIP
+	}
 	return &Handler{
-		DB:        db,
-		Config:    cfg,
-		Clients:   make(map[*wsClient]struct{}),
-		Broadcast: make(chan model.DeleteEventMessage, 100),
-		ws:        defaultWSSettings(),
-		wsSlots:   make(chan struct{}, maxConns),
+		DB:         db,
+		Config:     cfg,
+		Clients:    make(map[*wsClient]struct{}),
+		Broadcast:  make(chan model.DeleteEventMessage, 100),
+		ws:         defaultWSSettings(),
+		wsSlots:    make(chan struct{}, maxConns),
+		wsPerIP:    make(map[string]int),
+		wsPerIPMax: perIPMax,
 	}
 }
 

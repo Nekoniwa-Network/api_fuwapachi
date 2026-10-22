@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -290,5 +291,77 @@ func TestWebSocket_TrailingCommaDoesNotAllowMissingOrigin(t *testing.T) {
 	u := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws"
 	if _, _, err := websocket.DefaultDialer.Dial(u, nil); err == nil {
 		t.Error("connection without Origin header should be refused")
+	}
+}
+
+func dialWSAs(t *testing.T, serverURL, cfIP string) (*websocket.Conn, *http.Response, error) {
+	t.Helper()
+	u := strings.Replace(serverURL, "http://", "ws://", 1) + "/ws"
+	header := http.Header{}
+	header.Set("Origin", testOrigin)
+	header.Set("CF-Connecting-IP", cfIP)
+	return websocket.DefaultDialer.Dial(u, header)
+}
+
+// 信頼するプロキシ経由では、接続元ごとの上限を超えた接続を 429 で断り、
+// 他の接続元は接続でき、切断すると枠が戻ること
+func TestWebSocket_PerClientLimit(t *testing.T) {
+	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
+	h := New(nil, config.Config{
+		AllowedOrigins:        []string{testOrigin},
+		TrustedProxies:        []*net.IPNet{loopback},
+		WSMaxConnectionsPerIP: 2,
+	})
+	server := httptest.NewServer(h.SetupRouter())
+	defer server.Close()
+
+	a1, _, err := dialWSAs(t, server.URL, "198.51.100.1")
+	if err != nil {
+		t.Fatalf("a1: %v", err)
+	}
+	defer a1.Close()
+	a2, _, err := dialWSAs(t, server.URL, "198.51.100.1")
+	if err != nil {
+		t.Fatalf("a2: %v", err)
+	}
+	defer a2.Close()
+
+	_, resp, err := dialWSAs(t, server.URL, "198.51.100.1")
+	if err == nil || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("a3: err=%v resp=%v, want 429", err, resp)
+	}
+
+	b1, _, err := dialWSAs(t, server.URL, "198.51.100.2")
+	if err != nil {
+		t.Fatalf("b1 (別の接続元) should connect: %v", err)
+	}
+	defer b1.Close()
+
+	a1.Close()
+	if !waitFor(t, 2*time.Second, func() bool { return h.ClientCount() == 2 }) {
+		t.Fatalf("a1 not unregistered, count = %d", h.ClientCount())
+	}
+	a4, _, err := dialWSAs(t, server.URL, "198.51.100.1")
+	if err != nil {
+		t.Fatalf("a4 after release: %v", err)
+	}
+	a4.Close()
+}
+
+// 信頼するプロキシが未設定なら、接続元ごとの上限は使わない（全員が cloudflared に見えるため）
+func TestWebSocket_PerClientLimitDisabledWithoutTrustedProxies(t *testing.T) {
+	h := New(nil, config.Config{
+		AllowedOrigins:        []string{testOrigin},
+		WSMaxConnectionsPerIP: 1,
+	})
+	server := httptest.NewServer(h.SetupRouter())
+	defer server.Close()
+
+	for i := 0; i < 3; i++ {
+		ws, _, err := dialWSAs(t, server.URL, "198.51.100.1")
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		defer ws.Close()
 	}
 }

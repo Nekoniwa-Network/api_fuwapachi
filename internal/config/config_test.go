@@ -60,6 +60,21 @@ func TestLoad_TrustedProxyCIDRs(t *testing.T) {
 	}
 }
 
+func TestLoad_WSMaxConnectionsPerIP(t *testing.T) {
+	t.Setenv("WS_MAX_CONNECTIONS_PER_IP", "")
+	if got := Load().WSMaxConnectionsPerIP; got != DefaultWSMaxConnectionsPerIP {
+		t.Errorf("default = %d, want %d", got, DefaultWSMaxConnectionsPerIP)
+	}
+	t.Setenv("WS_MAX_CONNECTIONS_PER_IP", "3")
+	if got := Load().WSMaxConnectionsPerIP; got != 3 {
+		t.Errorf("got %d, want 3", got)
+	}
+	t.Setenv("WS_MAX_CONNECTIONS_PER_IP", "0")
+	if got := Load().WSMaxConnectionsPerIP; got != DefaultWSMaxConnectionsPerIP {
+		t.Errorf("invalid value: got %d, want default", got)
+	}
+}
+
 func TestLoad_WSMaxConnections(t *testing.T) {
 	tests := []struct {
 		in   string

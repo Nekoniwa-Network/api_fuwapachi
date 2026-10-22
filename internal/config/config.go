@@ -11,6 +11,9 @@ import (
 // DefaultWSMaxConnections は WebSocket の同時接続数の上限（既定値）
 const DefaultWSMaxConnections = 1000
 
+// DefaultWSMaxConnectionsPerIP は WebSocket の接続元ごとの同時接続数の上限（既定値）
+const DefaultWSMaxConnectionsPerIP = 10
+
 // Config holds application configuration
 type Config struct {
 	// MariaDB接続設定
@@ -33,6 +36,9 @@ type Config struct {
 
 	// WebSocket の同時接続数の上限
 	WSMaxConnections int
+
+	// WebSocket の接続元ごとの同時接続数の上限（TrustedProxies が空のときは使わない）
+	WSMaxConnectionsPerIP int
 }
 
 // Load loads configuration from environment variables
@@ -99,17 +105,24 @@ func Load() Config {
 		log.Printf("⚠️⚠️⚠️  The per-IP WebSocket connection limit is disabled. Set TRUSTED_PROXY_CIDRS to the cloudflared address.")
 	}
 
-	cfg.WSMaxConnections = DefaultWSMaxConnections
-	if v := strings.TrimSpace(os.Getenv("WS_MAX_CONNECTIONS")); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n <= 0 {
-			log.Printf("⚠️  WS_MAX_CONNECTIONS: invalid value %q, using default %d", v, DefaultWSMaxConnections)
-		} else {
-			cfg.WSMaxConnections = n
-		}
-	}
+	cfg.WSMaxConnections = positiveIntEnv("WS_MAX_CONNECTIONS", DefaultWSMaxConnections)
+	cfg.WSMaxConnectionsPerIP = positiveIntEnv("WS_MAX_CONNECTIONS_PER_IP", DefaultWSMaxConnectionsPerIP)
 
 	return cfg
+}
+
+// positiveIntEnv は環境変数を正の整数として読む。未設定なら既定値、不正なら警告して既定値を返す
+func positiveIntEnv(name string, def int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf("⚠️  %s: invalid value %q, using default %d", name, v, def)
+		return def
+	}
+	return n
 }
 
 // ParseAllowedOrigins はカンマ区切りのオリジンの並びを解釈する
