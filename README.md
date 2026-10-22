@@ -131,7 +131,7 @@ go run ./cmd/server/
 | `SERVER_PORT` | サーバーポート | `8080` |
 | `ENV` | 環境 (development/production) | `development` |
 | `ALLOWED_ORIGINS` | CORS許可オリジン（カンマ区切り）。空の要素は捨てる。`*`を含む要素は使えず、起動時に警告を出して捨てる | `http://localhost:3000,http://127.0.0.1:3000` |
-| `TRUSTED_PROXY_CIDRS` | レート制限で`CF-Connecting-IP`を信じてよい接続元（cloudflared）の範囲（カンマ区切りのCIDR）。空なら誰も信頼しない | 空 |
+| `TRUSTED_PROXY_CIDRS` | レート制限で`CF-Connecting-IP`を信じてよい接続元（cloudflared）の範囲（カンマ区切りのCIDR）。空なら誰も信頼せず、レート制限は変更前と同じく`RemoteAddr`（IP:ポート）で数え、WebSocketの接続元ごとの上限は使わない。トンネルの裏で動かす本番では必ず設定する（未設定だと起動時に警告を出す）。ホスト部分が0でない値は捨て、IPv4で/24、IPv6で/64より広い範囲には警告を出す | 空 |
 | `WS_MAX_CONNECTIONS` | WebSocketの同時接続数の上限。超えた接続は503で断る | `1000` |
 
 ## API仕様

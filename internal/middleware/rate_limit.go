@@ -3,6 +3,7 @@ package middleware
 import (
 	"container/list"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -131,8 +132,7 @@ func (rl *RateLimiter) limiterFor(key string, r rate.Limit, b int) *rate.Limiter
 func (rl *RateLimiter) Limit(r rate.Limit, b int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			ip := ClientIP(req, rl.trustedProxies)
-			limiter := rl.limiterFor(ip, r, b)
+			limiter := rl.limiterFor(RateLimitKey(req, rl.trustedProxies), r, b)
 
 			if !limiter.Allow() {
 				w.Header().Set("Content-Type", "application/json")
@@ -146,12 +146,30 @@ func (rl *RateLimiter) Limit(r rate.Limit, b int) func(http.Handler) http.Handle
 	}
 }
 
-// ClientIP はレート制限の鍵にする接続元の IP を返す
+// RateLimitKey はレート制限の鍵を返す
+//
+// trustedProxies が空のときは、変更前と同じく RemoteAddr（IP:ポート）をそのまま鍵にする。
+// トンネルの裏で信頼する範囲を設定し忘れたとき、ホスト部分だけを鍵にすると
+// 利用者全員が cloudflared の 1 つの枠を分け合ってしまうため、変更前より悪くしない。
+// trustedProxies があるときは ClientIP を鍵にする。
+func RateLimitKey(req *http.Request, trustedProxies []*net.IPNet) string {
+	if len(trustedProxies) == 0 {
+		return req.RemoteAddr
+	}
+	return ClientIP(req, trustedProxies)
+}
+
+// ipv6KeyPrefix は IPv6 の鍵を丸める長さ。利用者は通常 /64 以上を持ち、その中で
+// アドレスを替えられるため、/64 を 1 つの接続元とみなす
+const ipv6KeyPrefix = 64
+
+// ClientIP は接続元を表す鍵（IP）を返す
 //
 //   - RemoteAddr からポートを外したホスト部分を使う
 //   - そのホストが trustedProxies に入るときに限り、CF-Connecting-IP の値が
 //     IP として正しければそれを使う
 //   - X-Forwarded-For は偽装できるため使わない
+//   - IPv6 は /64 に丸め、"2001:db8::/64" の形で返す
 func ClientIP(req *http.Request, trustedProxies []*net.IPNet) string {
 	host := remoteHost(req.RemoteAddr)
 	remoteIP := net.ParseIP(host)
@@ -163,12 +181,20 @@ func ClientIP(req *http.Request, trustedProxies []*net.IPNet) string {
 	if containsIP(trustedProxies, remoteIP) {
 		if v := strings.TrimSpace(req.Header.Get(cfConnectingIPHeader)); v != "" {
 			if cfIP := net.ParseIP(v); cfIP != nil {
-				return cfIP.String()
+				return ipKey(cfIP)
 			}
 		}
 	}
 
-	return remoteIP.String()
+	return ipKey(remoteIP)
+}
+
+// ipKey は IPv4（IPv4 射影アドレスを含む）はそのまま、IPv6 は /64 に丸めた文字列にする
+func ipKey(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return fmt.Sprintf("%s/%d", ip.Mask(net.CIDRMask(ipv6KeyPrefix, 128)), ipv6KeyPrefix)
 }
 
 // remoteHost は "host:port" からホスト部分を取り出す。ポートが無いときは全体を返す

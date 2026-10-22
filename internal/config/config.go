@@ -85,11 +85,19 @@ func Load() Config {
 	}
 	cfg.AllowedOrigins = origins
 
-	trusted, invalid := ParseCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	trusted, invalid, wide := ParseCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
 	for _, v := range invalid {
-		log.Printf("⚠️  TRUSTED_PROXY_CIDRS: ignoring invalid entry %q", v)
+		log.Printf("⚠️  TRUSTED_PROXY_CIDRS: ignoring invalid entry %q (unparsable, or host bits are not zero)", v)
+	}
+	for _, v := range wide {
+		log.Printf("⚠️  TRUSTED_PROXY_CIDRS: %q is a wide range; every host in it can set CF-Connecting-IP freely", v)
 	}
 	cfg.TrustedProxies = trusted
+	if len(trusted) == 0 && env == "production" {
+		log.Printf("⚠️⚠️⚠️  TRUSTED_PROXY_CIDRS is not set in production.")
+		log.Printf("⚠️⚠️⚠️  Rate limiting falls back to RemoteAddr (IP:port), which is the cloudflared connection, not the user.")
+		log.Printf("⚠️⚠️⚠️  The per-IP WebSocket connection limit is disabled. Set TRUSTED_PROXY_CIDRS to the cloudflared address.")
+	}
 
 	cfg.WSMaxConnections = DefaultWSMaxConnections
 	if v := strings.TrimSpace(os.Getenv("WS_MAX_CONNECTIONS")); v != "" {
@@ -125,11 +133,20 @@ func ParseAllowedOrigins(s string) (origins []string, rejected []string) {
 	return origins, rejected
 }
 
+// 信頼するプロキシの範囲として広すぎるとみなすプレフィックス長（これより短いと警告する）
+const (
+	wideIPv4Prefix = 24
+	wideIPv6Prefix = 64
+)
+
 // ParseCIDRs はカンマ区切りの CIDR の並びを解釈する
 //
 // 空の要素は捨てる。"/" の無い IP は 1 台だけの範囲（/32 または /128）として扱う。
-// 解釈できない要素は invalid に入れて返し、範囲には含めない（信頼する範囲を広げない）。
-func ParseCIDRs(s string) (nets []*net.IPNet, invalid []string) {
+// 解釈できない要素と、ホスト部分が 0 でない要素（"100.101.188.8/10" のように
+// "/32" の書き間違いで範囲が広がるもの）は invalid に入れて返し、範囲には含めない
+// （信頼する範囲を広げない）。
+// IPv4 で /24、IPv6 で /64 より広い範囲は使うが、wide に入れて返す（起動時に警告する）。
+func ParseCIDRs(s string) (nets []*net.IPNet, invalid []string, wide []string) {
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -149,12 +166,16 @@ func ParseCIDRs(s string) (nets []*net.IPNet, invalid []string) {
 			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
 			continue
 		}
-		_, n, err := net.ParseCIDR(part)
-		if err != nil {
+		ip, n, err := net.ParseCIDR(part)
+		if err != nil || !ip.Equal(n.IP) {
 			invalid = append(invalid, part)
 			continue
 		}
+		ones, bits := n.Mask.Size()
+		if (bits == 32 && ones < wideIPv4Prefix) || (bits == 128 && ones < wideIPv6Prefix) {
+			wide = append(wide, part)
+		}
 		nets = append(nets, n)
 	}
-	return nets, invalid
+	return nets, invalid, wide
 }

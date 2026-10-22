@@ -34,12 +34,15 @@ func TestClientIP(t *testing.T) {
 		want       string
 	}{
 		{name: "IPv4 のポートを外す", remoteAddr: "203.0.113.5:54321", want: "203.0.113.5"},
-		{name: "IPv6 のポートと角括弧を外す", remoteAddr: "[2001:db8::1]:443", want: "2001:db8::1"},
+		{name: "IPv6 のポートと角括弧を外し /64 に丸める", remoteAddr: "[2001:db8::1]:443", want: "2001:db8::/64"},
+		{name: "同じ /64 の別のアドレスは同じ鍵", remoteAddr: "[2001:db8::ffff:1234:5678:9abc]:443", want: "2001:db8::/64"},
+		{name: "別の /64 は別の鍵", remoteAddr: "[2001:db8:0:1::1]:443", want: "2001:db8:0:1::/64"},
+		{name: "IPv4 射影アドレスは IPv4 に戻す", remoteAddr: "[::ffff:203.0.113.5]:443", want: "203.0.113.5"},
 		{name: "ポートが無い RemoteAddr", remoteAddr: "203.0.113.5", want: "203.0.113.5"},
 		{name: "信頼する範囲が空なら CF-Connecting-IP を無視", remoteAddr: "100.101.188.8:1234", cfIP: "198.51.100.7", want: "100.101.188.8"},
 		{name: "信頼するプロキシからの CF-Connecting-IP を使う", remoteAddr: "100.101.188.8:1234", cfIP: "198.51.100.7", trusted: trusted, want: "198.51.100.7"},
 		{name: "CF-Connecting-IP の前後の空白を許す", remoteAddr: "100.101.188.8:1234", cfIP: "  198.51.100.7 ", trusted: trusted, want: "198.51.100.7"},
-		{name: "信頼するプロキシからの IPv6 の CF-Connecting-IP", remoteAddr: "100.101.188.8:1234", cfIP: "2001:db8::abcd", trusted: trusted, want: "2001:db8::abcd"},
+		{name: "信頼するプロキシからの IPv6 の CF-Connecting-IP は /64 に丸める", remoteAddr: "100.101.188.8:1234", cfIP: "2001:db8::abcd", trusted: trusted, want: "2001:db8::/64"},
 		{name: "IPv6 の信頼するプロキシ", remoteAddr: "[fd12::1]:1234", cfIP: "198.51.100.7", trusted: trusted, want: "198.51.100.7"},
 		{name: "範囲外の接続元の CF-Connecting-IP は無視", remoteAddr: "100.101.188.9:1234", cfIP: "198.51.100.7", trusted: trusted, want: "100.101.188.9"},
 		{name: "IP として正しくない CF-Connecting-IP は無視", remoteAddr: "100.101.188.8:1234", cfIP: "not-an-ip", trusted: trusted, want: "100.101.188.8"},
@@ -65,9 +68,9 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
-// 同じ IP からポートを変えて接続しても、同じ枠を使うこと
+// 信頼する範囲を設定したとき、同じ IP からポートを変えて接続しても同じ枠を使うこと
 func TestLimit_SameIPDifferentPortsShareQuota(t *testing.T) {
-	rl := newRateLimiter(nil, 0)
+	rl := newRateLimiter(mustCIDRs(t, "100.101.188.8/32"), 0)
 	h := rl.Limit(1, 2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -181,5 +184,55 @@ func TestRateLimiter_RemoveIdle(t *testing.T) {
 	rl.mu.Unlock()
 	if hasOld || !hasNew || n != 1 {
 		t.Errorf("after removeIdle: old=%v new=%v lru=%d, want old=false new=true lru=1", hasOld, hasNew, n)
+	}
+}
+
+// 信頼する範囲が未設定のときは、変更前と同じく RemoteAddr（IP:ポート）全体を鍵にすること
+// （トンネルの裏で設定し忘れても、全員が cloudflared の 1 つの枠を分け合わない）
+func TestRateLimitKey_UnsetKeepsRemoteAddr(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/messages", nil)
+	req.RemoteAddr = "100.101.188.8:40001"
+	req.Header.Set("CF-Connecting-IP", "198.51.100.7")
+	if got := RateLimitKey(req, nil); got != "100.101.188.8:40001" {
+		t.Errorf("RateLimitKey(unset) = %q, want RemoteAddr as is", got)
+	}
+	if got := RateLimitKey(req, mustCIDRs(t, "100.101.188.8/32")); got != "198.51.100.7" {
+		t.Errorf("RateLimitKey(trusted) = %q, want CF-Connecting-IP", got)
+	}
+}
+
+func TestLimit_UnsetDifferentPortsAreSeparate(t *testing.T) {
+	rl := newRateLimiter(nil, 0)
+	h := rl.Limit(1, 1)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/messages", nil)
+		req.RemoteAddr = fmt.Sprintf("100.101.188.8:%d", 40000+i)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d from a new connection = %d, want 200 (変更前と同じ接続ごとの枠)", i, rr.Code)
+		}
+	}
+}
+
+// 信頼するプロキシ経由で、同じ /64 の IPv6 アドレスを替えても同じ枠になること
+func TestLimit_IPv6SameSlash64SharesQuota(t *testing.T) {
+	rl := newRateLimiter(mustCIDRs(t, "100.101.188.8/32"), 0)
+	h := rl.Limit(1, 2)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	codes := []int{}
+	for _, ip := range []string{"2001:db8::1", "2001:db8::2", "2001:db8::dead:beef"} {
+		req := httptest.NewRequest(http.MethodPost, "/messages", nil)
+		req.RemoteAddr = "100.101.188.8:5555"
+		req.Header.Set("CF-Connecting-IP", ip)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		codes = append(codes, rr.Code)
+	}
+	if codes[0] != 200 || codes[1] != 200 || codes[2] != http.StatusTooManyRequests {
+		t.Errorf("codes = %v, want [200 200 429]", codes)
 	}
 }
