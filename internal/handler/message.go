@@ -163,11 +163,11 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		if maxID < 50 {
 			numToGenerate = maxID
 		}
-		
+
 		selectedIDs := make(map[int]bool)
 		var args []interface{}
 		inClause := ""
-		
+
 		for len(selectedIDs) < numToGenerate {
 			randID := rand.Intn(maxID) + 1
 			if !selectedIDs[randID] {

@@ -29,7 +29,7 @@ func setupTestRouter() (*mux.Router, sqlmock.Sqlmock, error) {
 	postRouter.HandleFunc("/messages", h.CreateMessage)
 	deleteRouter := r.Methods("DELETE").Subrouter()
 	deleteRouter.HandleFunc("/messages/{id}", h.DeleteMessage)
-	
+
 	rl := middleware.NewRateLimiter()
 	postRouter.Use(rl.Limit(1, 5))
 	deleteRouter.Use(rl.Limit(1, 5))

@@ -37,14 +37,14 @@ func (h *Handler) SetupRouter() *mux.Router {
 
 	// REST API
 	r.HandleFunc("/messages", h.GetMessages).Methods("GET")
-	
+
 	// Create a subrouter for POST and DELETE to apply rate limiting (e.g. 1 req/sec, burst 5)
 	postRouter := r.Methods("POST").Subrouter()
 	postRouter.HandleFunc("/messages", h.CreateMessage)
-	
+
 	deleteRouter := r.Methods("DELETE").Subrouter()
 	deleteRouter.HandleFunc("/messages/{id}", h.DeleteMessage)
-	
+
 	rl := middleware.NewRateLimiter()
 	// limit to 1 request per second with a burst of 5 per IP
 	postRouter.Use(rl.Limit(1, 5))
