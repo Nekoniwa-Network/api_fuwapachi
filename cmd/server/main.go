@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"net/http"
 
 	"github.com/joho/godotenv"
 	"github.com/rs/cors"
@@ -11,6 +10,7 @@ import (
 	"fuwapachi/internal/config"
 	"fuwapachi/internal/database"
 	"fuwapachi/internal/handler"
+	"fuwapachi/internal/server"
 )
 
 func main() {
@@ -61,5 +61,6 @@ func main() {
 	fmt.Printf("  Allowed Origins: %v\n", cfg.AllowedOrigins)
 	fmt.Println("========================================")
 	log.Println("🚀 Server started successfully")
-	log.Fatal(http.ListenAndServe(":"+cfg.ServerPort, httpHandler))
+	srv := server.New(":"+cfg.ServerPort, httpHandler)
+	log.Fatal(srv.ListenAndServe())
 }
