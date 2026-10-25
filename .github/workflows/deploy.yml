@@ -91,7 +91,6 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }} # workload identity の client ID
           audience: ${{ secrets.TS_AUDIENCE }}
           tags: tag:ci
-          args: --accept-routes # サブネットルーターの経路を受け入れる
 
       - name: Prepare SSH
         env:
