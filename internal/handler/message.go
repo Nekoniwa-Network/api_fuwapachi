@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -15,6 +16,18 @@ import (
 
 	"fuwapachi/internal/model"
 )
+
+// dbWriteTimeout は INSERT と UPDATE にかけてよい時間（テストで短くできるよう変数にする）
+var dbWriteTimeout = 5 * time.Second
+
+// writeContext は状態を変える DB 呼び出し用のコンテキストを返す
+//
+// 要求の取り消しは引き継がず、期限だけを付ける。読み取りと違い、利用者が切断した
+// 時点で打ち切ると、MariaDB では文が確定しているのに 500 を返し、DELETE なら
+// 削除の通知も出ない場面が生じるため。
+func writeContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.Context()), dbWriteTimeout)
+}
 
 // CreateMessage handles POST /messages
 func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +71,9 @@ func (h *Handler) CreateMessage(w http.ResponseWriter, r *http.Request) {
 	msg.DeletedAt = nil
 
 	// Insert message into database with AUTO_INCREMENT id
-	result, err := h.DB.Exec("INSERT INTO messages (content, created_at, deleted_at) VALUES (?, ?, ?)",
+	writeCtx, cancel := writeContext(r)
+	defer cancel()
+	result, err := h.DB.ExecContext(writeCtx, "INSERT INTO messages (content, created_at, deleted_at) VALUES (?, ?, ?)",
 		msg.Content, msg.CreatedAt, msg.DeletedAt)
 	if err != nil {
 		log.Printf("[POST /messages] ❌ Database error: %v", err)
@@ -145,7 +160,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 
 	// 1. 最大IDを取得
 	var maxID int
-	err := h.DB.QueryRow("SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&maxID)
+	err := h.DB.QueryRowContext(r.Context(), "SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&maxID)
 	if err != nil {
 		log.Printf("[GET /messages] ❌ Database error: %v", err)
 		w.Header().Set("Content-Type", "application/json")
@@ -163,11 +178,11 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		if maxID < 50 {
 			numToGenerate = maxID
 		}
-		
+
 		selectedIDs := make(map[int]bool)
 		var args []interface{}
 		inClause := ""
-		
+
 		for len(selectedIDs) < numToGenerate {
 			randID := rand.Intn(maxID) + 1
 			if !selectedIDs[randID] {
@@ -184,7 +199,7 @@ func (h *Handler) GetMessages(w http.ResponseWriter, r *http.Request) {
 		query := fmt.Sprintf("SELECT id, content, created_at FROM messages WHERE id IN (%s) AND deleted_at IS NULL LIMIT ?", inClause)
 		args = append(args, maxMessagesPerRequest)
 
-		rows, err := h.DB.Query(query, args...)
+		rows, err := h.DB.QueryContext(r.Context(), query, args...)
 		if err != nil {
 			log.Printf("[GET /messages] ❌ Database error: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -220,7 +235,7 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Check if message exists and is not already deleted
 	var exists bool
-	err := h.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND deleted_at IS NULL)", id).Scan(&exists)
+	err := h.DB.QueryRowContext(r.Context(), "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND deleted_at IS NULL)", id).Scan(&exists)
 	if err != nil {
 		log.Printf("[DELETE /messages/%s] ❌ Database error: %v", id, err)
 		w.Header().Set("Content-Type", "application/json")
@@ -239,7 +254,9 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Update deleted_at timestamp
 	now := time.Now()
-	_, err = h.DB.Exec("UPDATE messages SET deleted_at = ? WHERE id = ?", now, id)
+	writeCtx, cancel := writeContext(r)
+	defer cancel()
+	_, err = h.DB.ExecContext(writeCtx, "UPDATE messages SET deleted_at = ? WHERE id = ?", now, id)
 	if err != nil {
 		log.Printf("[DELETE /messages/%s] ❌ Database error: %v", id, err)
 		w.Header().Set("Content-Type", "application/json")
@@ -251,12 +268,17 @@ func (h *Handler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[DELETE /messages/%s] ✅ Deleted successfully", id)
 
 	// WebSocket経由で他のクライアントに削除を通知
-	h.Broadcast <- model.DeleteEventMessage{
+	// 配信のチャネルが詰まっていても HTTP の応答は止めない（通知は落とす）
+	select {
+	case h.Broadcast <- model.DeleteEventMessage{
 		Type:      "message_deleted",
 		ID:        id,
 		DeletedAt: now,
+	}:
+		log.Printf("[WebSocket] 📢 Broadcasting delete event for message: %s", id)
+	default:
+		log.Printf("[WebSocket] ⚠️  Broadcast queue full, dropping delete event for message: %s", id)
 	}
-	log.Printf("[WebSocket] 📢 Broadcasting delete event for message: %s", id)
 
 	w.WriteHeader(http.StatusNoContent)
 }

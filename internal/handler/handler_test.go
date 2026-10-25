@@ -88,14 +88,9 @@ func cleanupTestDB(testDB *sql.DB) {
 
 // newTestHandler テスト用のHandlerを生成
 func newTestHandler(testDB *sql.DB) *Handler {
-	return &Handler{
-		DB: testDB,
-		Config: config.Config{
-			AllowedOrigins: []string{"http://localhost:8080", "http://127.0.0.1:8080"},
-		},
-		Clients:   make(map[*websocket.Conn]bool),
-		Broadcast: make(chan model.DeleteEventMessage, 100),
-	}
+	return New(testDB, config.Config{
+		AllowedOrigins: []string{"http://localhost:8080", "http://127.0.0.1:8080"},
+	})
 }
 
 // TestCreateMessage_Success メッセージ作成成功テスト
@@ -446,13 +441,7 @@ func TestDeleteMessage_NotFound(t *testing.T) {
 
 // TestWebSocketConnection WebSocket 接続テスト
 func TestWebSocketConnection(t *testing.T) {
-	h := &Handler{
-		Config: config.Config{
-			AllowedOrigins: []string{"http://localhost:8080", "http://127.0.0.1:8080"},
-		},
-		Clients:   make(map[*websocket.Conn]bool),
-		Broadcast: make(chan model.DeleteEventMessage, 100),
-	}
+	h := newTestHandler(nil)
 
 	server := httptest.NewServer(h.SetupRouter())
 	defer server.Close()
@@ -469,12 +458,13 @@ func TestWebSocketConnection(t *testing.T) {
 	}
 	defer ws.Close()
 
-	// 接続確認
-	h.ClientMu.RLock()
-	clientCount := len(h.Clients)
-	h.ClientMu.RUnlock()
+	// 接続確認（登録はサーバー側のゴルーチンで Upgrade の後に行われるので、少し待つ）
+	deadline := time.Now().Add(time.Second)
+	for h.ClientCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 
-	if clientCount == 0 {
+	if h.ClientCount() == 0 {
 		t.Error("WebSocket client should be registered")
 	}
 
@@ -487,13 +477,7 @@ func TestWebSocketConnection(t *testing.T) {
 
 // TestWebSocketOriginCheck Origin チェックテスト
 func TestWebSocketOriginCheck(t *testing.T) {
-	h := &Handler{
-		Config: config.Config{
-			AllowedOrigins: []string{"http://localhost:8080", "http://127.0.0.1:8080"},
-		},
-		Clients:   make(map[*websocket.Conn]bool),
-		Broadcast: make(chan model.DeleteEventMessage, 100),
-	}
+	h := newTestHandler(nil)
 
 	server := httptest.NewServer(h.SetupRouter())
 	defer server.Close()
