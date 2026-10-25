@@ -115,7 +115,8 @@ jobs:
             < "$RUNNER_TEMP/artifact/release.tgz"
 
           # 2) 展開 → current 切替 → 再起動 → ヘルスチェック → 失敗なら前の版へ戻す
-          $SSH "$TARGET" bash -s -- "$APP" "$SHA" "$UNIT" "$HEALTH_URL" "" "$HEALTH_ORIGIN" <<'REMOTE'
+          # ssh は引数を空白でつないで送るため、空の引数が消えて位置がずれる。%q で引用してから渡す
+          $SSH "$TARGET" "bash -s -- $(printf '%q ' "$APP" "$SHA" "$UNIT" "$HEALTH_URL" "" "$HEALTH_ORIGIN")" <<'REMOTE'
           set -euo pipefail
           APP=$1; SHA=$2; UNIT=$3; HEALTH_URL=$4; WRITABLE_DIRS=${5:-}; HEALTH_ORIGIN=${6:-}
           BASE=/opt/$APP
