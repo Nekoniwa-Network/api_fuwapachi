@@ -1,0 +1,177 @@
+name: build-and-deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  APP: api_fuwapachi
+  # VM105 の unit 名（2026-10-25 に確認）
+  UNIT: ${{ vars.SYSTEMD_UNIT || 'fuwapachi-api.service' }}
+  # リポジトリに /health が無い (2026-10-22 時点)。DB を引く GET /messages の 200 で代用する。
+  # /healthz を追加したら Repository variable HEALTH_URL で差し替える。
+  HEALTH_URL: ${{ vars.HEALTH_URL || 'http://127.0.0.1:8080/messages' }}
+  # GET /messages は Origin も Referer も無い要求を 403 で断る (internal/handler/message.go)。
+  # 許可済みの Origin を付けて呼ぶ。/healthz を足したら不要になる。
+  HEALTH_ORIGIN: ${{ vars.HEALTH_ORIGIN || 'https://fuwapachi.nekoniwa-network.net' }}
+  GOARCH: ${{ vars.GOARCH || 'amd64' }} # VM105 が arm64 なら arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # go 1.25.5
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        # DB が要るテストは DB_HOST 未設定だと Skip される。CI では DB を立てないので Skip 分は検証されない。
+        run: go test ./...
+
+      - name: Build (linux, 静的)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stage"
+          go build -trimpath -o "$RUNNER_TEMP/stage/fuwapachi" ./cmd/server
+          tar -czf "$RUNNER_TEMP/release.tgz" -C "$RUNNER_TEMP/stage" .
+          ls -l "$RUNNER_TEMP/release.tgz"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'push'
+        with:
+          name: release-${{ github.sha }}
+          path: ${{ runner.temp }}/release.tgz
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    # PR では動かさない。main への push かタグだけ。
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production # 承認者必須 (Settings > Environments > production > Required reviewers)
+    concurrency:
+      group: deploy-api_fuwapachi
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # tailscale の workload identity が GitHub の OIDC トークンを要求する
+    env:
+      DEPLOY_USER: deploy
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '192.168.100.74' }} # VM105 の LAN の IP。tailnet のサブネットルーター（CT100）経由で届く。
+      # tailnet の IP だと Tailscale SSH の check で止まるため、LAN の sshd に入る
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ github.sha }}
+          path: ${{ runner.temp }}/artifact
+
+      - name: Join tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }} # workload identity の client ID
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+          args: --accept-routes # サブネットルーターの経路を受け入れる
+
+      - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload, switch, restart, health check
+        run: |
+          set -euo pipefail
+          SSH="ssh -i $HOME/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
+          TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
+
+          # 1) 転送 (/opt/$APP/incoming/<sha>.tgz)
+          $SSH "$TARGET" "mkdir -p /opt/${APP}/incoming && cat > /opt/${APP}/incoming/${SHA}.tgz" \
+            < "$RUNNER_TEMP/artifact/release.tgz"
+
+          # 2) 展開 → current 切替 → 再起動 → ヘルスチェック → 失敗なら前の版へ戻す
+          $SSH "$TARGET" bash -s -- "$APP" "$SHA" "$UNIT" "$HEALTH_URL" "" "$HEALTH_ORIGIN" <<'REMOTE'
+          set -euo pipefail
+          APP=$1; SHA=$2; UNIT=$3; HEALTH_URL=$4; WRITABLE_DIRS=${5:-}; HEALTH_ORIGIN=${6:-}
+          BASE=/opt/$APP
+          REL=$BASE/releases/$SHA
+          KEEP=5
+
+          mkdir -p "$BASE/releases"
+          if [ ! -d "$REL" ]; then
+            rm -rf "$REL.tmp"; mkdir "$REL.tmp"
+            tar -xzf "$BASE/incoming/$SHA.tgz" -C "$REL.tmp" --no-same-owner
+            for d in $WRITABLE_DIRS; do mkdir -p "$REL.tmp/$d"; chmod -R g+rwX "$REL.tmp/$d"; done
+            chmod -R go+rX "$REL.tmp"
+            mv "$REL.tmp" "$REL"
+          fi
+          rm -f "$BASE/incoming/$SHA.tgz"
+
+          PREV=$(readlink -f "$BASE/current" 2>/dev/null || true)
+          ln -sfn "$REL" "$BASE/current.new"
+          mv -Tf "$BASE/current.new" "$BASE/current"   # 原子的に切替
+          echo "switched: ${PREV:-<none>} -> $REL"
+
+          health() {
+            for i in $(seq 1 30); do
+              if systemctl is-active --quiet "$UNIT" && curl -fsS -m 3 -o /dev/null ${HEALTH_ORIGIN:+-H "Origin: $HEALTH_ORIGIN"} "$HEALTH_URL"; then return 0; fi
+              sleep 2
+            done
+            return 1
+          }
+
+          sudo -n /usr/bin/systemctl restart "$UNIT"
+          if health; then
+            echo "health OK"
+          else
+            echo "health NG: rolling back" >&2
+            if [ -n "$PREV" ] && [ -d "$PREV" ]; then
+              ln -sfn "$PREV" "$BASE/current.new"
+              mv -Tf "$BASE/current.new" "$BASE/current"
+              sudo -n /usr/bin/systemctl restart "$UNIT"
+              if health; then echo "rolled back to $PREV (health OK)" >&2; else echo "rollback also unhealthy" >&2; fi
+            else
+              echo "no previous release to roll back to" >&2
+            fi
+            exit 1
+          fi
+
+          # 古い版を掃除 (current と直前の版は残す)
+          CUR=$(readlink -f "$BASE/current")
+          ls -1dt "$BASE"/releases/*/ 2>/dev/null | sed 's#/$##' | tail -n +$((KEEP + 1)) | while read -r d; do
+            [ "$d" = "$CUR" ] || [ "$d" = "$PREV" ] || rm -rf "$d"
+          done
+          REMOTE
+
+# --- 登録するもの (リポジトリ Settings) ------------------------------------
+# Environment: production (Required reviewers を設定)
+#   Secrets  : TS_OAUTH_CLIENT_ID, TS_AUDIENCE (tailscale workload identity)
+#              DEPLOY_SSH_KEY (CI 専用 ed25519 秘密鍵), DEPLOY_KNOWN_HOSTS (ssh-keyscan でなく、ホスト上で確認した公開鍵行)
+#   Variables: DEPLOY_HOST (既定 192.168.100.74), SYSTEMD_UNIT, HEALTH_URL, GOARCH (任意)
+# tailnet の ACL: tag:ci から 192.168.100.74 の tcp:22 だけを許可（サブネットルーター経由）。tag:ci の tagOwners に federated identity を登録。
